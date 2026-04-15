@@ -1,0 +1,26 @@
+load("@kleaf//build/kernel/kleaf:kernel.bzl", "ddk_module")
+
+genrule(
+    name = "revision_h",
+    outs = ["driver/revision.h"],
+    cmd = """
+cat >$@ <<'EOF'
+#ifndef __REVISION_H__
+#define __REVISION_H__
+#endif
+EOF
+""",
+)
+
+ddk_module(
+    name = "px4_drv",
+    out = "px4_drv.ko",
+    kernel_build = "@gki_prebuilts//kernel_x86_64",
+    srcs = glob([
+        "driver/*.c",
+        "driver/*.h",
+        "include/**/*.h",
+    ]) + [":revision_h"],
+    includes = ["include"],
+    visibility = ["//visibility:public"],
+)
