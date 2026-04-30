@@ -1,26 +1,17 @@
-load("@kleaf//build/kernel/kleaf:kernel.bzl", "ddk_module")
+load("//build/kernel/kleaf:kernel.bzl", "kernel_module")
 
-genrule(
-    name = "revision_h",
-    outs = ["driver/revision.h"],
-    cmd = """
-cat >$@ <<'EOF'
-#ifndef __REVISION_H__
-#define __REVISION_H__
-#endif
-EOF
-""",
-)
-
-ddk_module(
+kernel_module(
     name = "px4_drv",
-    out = "px4_drv.ko",
-    kernel_build = "@gki_prebuilts//kernel_x86_64",
+    outs = ["px4_drv.ko"],
+    kernel_build = "//common:kernel_x86_64",
+    makefile = [":Makefile"],
     srcs = glob([
         "driver/*.c",
         "driver/*.h",
         "include/**/*.h",
-    ]) + [":revision_h"],
-    includes = ["include"],
+    ]) + [
+        "Kbuild",
+        "Makefile",
+    ],
     visibility = ["//visibility:public"],
 )
