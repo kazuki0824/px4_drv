@@ -1,0 +1,12 @@
+v2 changes after first ACK/Kleaf compile pass:
+
+- driver/px4_device_params.c:
+  - fixed tautological range check:
+    mode < PX4_MLDEV_ALL_MODE || mode > PX4_MLDEV_S1_ONLY_MODE
+
+- driver/px4_usb.c:
+  - fixed strict prototypes:
+    int px4_usb_register(void)
+    void px4_usb_unregister(void)
+
+These are source-level fixes for Android common kernel Clang -Werror builds.
