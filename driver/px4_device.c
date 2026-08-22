@@ -759,6 +759,15 @@ static int px4_chrdev_check_lock_t(struct ptx_chrdev *chrdev, bool *locked)
 	return tc90522_is_signal_locked_t(&chrdev4->tc90522, locked);
 }
 
+static int px4_chrdev_read_tmcc_partial_reception_t(
+	struct ptx_chrdev *chrdev, bool *partial_reception)
+{
+	struct px4_chrdev *chrdev4 = chrdev->priv;
+
+	return tc90522_get_tmcc_partial_reception_t(&chrdev4->tc90522,
+						    partial_reception);
+}
+
 static int px4_chrdev_check_lock_s(struct ptx_chrdev *chrdev, bool *locked)
 {
 	struct px4_chrdev *chrdev4 = chrdev->priv;
@@ -933,7 +942,7 @@ static int px4_chrdev_start_capture(struct ptx_chrdev *chrdev)
 			dev_err(px4->dev,
 				"px4_chrdev_start_capture %u:%u: itedtv_bus_start_streaming() failed. (ret: %d)\n",
 				chrdev_group->id, chrdev->id, ret);
-				goto fail_bus;
+			goto fail_bus;
 		}
 	}
 
@@ -1043,6 +1052,7 @@ static struct ptx_chrdev_operations px4_chrdev_t_ops = {
 	.release = px4_chrdev_release,
 	.tune = px4_chrdev_tune_t,
 	.check_lock = px4_chrdev_check_lock_t,
+	.read_tmcc_partial_reception = px4_chrdev_read_tmcc_partial_reception_t,
 	.set_stream_id = NULL,
 	.set_lnb_voltage = NULL,
 	.set_capture = px4_chrdev_set_capture,
@@ -1058,6 +1068,7 @@ static struct ptx_chrdev_operations px4_chrdev_s_ops = {
 	.release = px4_chrdev_release,
 	.tune = px4_chrdev_tune_s,
 	.check_lock = px4_chrdev_check_lock_s,
+	.read_tmcc_partial_reception = NULL,
 	.set_stream_id = px4_chrdev_set_stream_id_s,
 	.set_lnb_voltage = px4_chrdev_set_lnb_voltage_s,
 	.set_capture = px4_chrdev_set_capture,
