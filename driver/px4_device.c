@@ -783,7 +783,7 @@ static int px4_chrdev_read_tmcc_tsid_list_s(struct ptx_chrdev *chrdev,
 	int ret;
 
 	memset(list, 0, sizeof(*list));
-	for (i = 0; i < PTX_TMCC_TSID_MAX; i++) {
+	for (i = 0; i < TC90522_ISDB_S_RELATIVE_STREAM_COUNT; i++) {
 		u16 tsid = 0;
 
 		ret = tc90522_tmcc_get_tsid_s(&chrdev4->tc90522, i, &tsid);
@@ -810,7 +810,7 @@ static int px4_chrdev_set_stream_id_s(struct ptx_chrdev *chrdev, u16 stream_id)
 		"px4_chrdev_set_stream_id_s %u:%u\n",
 		chrdev_group->id, chrdev->id);
 
-	if (stream_id < 12) {
+	if (stream_id < TC90522_ISDB_S_RELATIVE_STREAM_COUNT) {
 		i = 100;
 		while (i--) {
 			ret = tc90522_tmcc_get_tsid_s(tc90522,

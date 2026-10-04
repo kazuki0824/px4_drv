@@ -639,7 +639,7 @@ static int m1ur_chrdev_set_stream_id(struct ptx_chrdev *chrdev,
 	if (chrdev->current_system != PTX_ISDB_S_SYSTEM)
 		return -EINVAL;
 
-	if (stream_id < 12) {
+	if (stream_id < TC90522_ISDB_S_RELATIVE_STREAM_COUNT) {
 		i = 100;
 		while (i--) {
 			ret = tc90522_tmcc_get_tsid_s(tc90522_s,
