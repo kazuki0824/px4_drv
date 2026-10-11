@@ -15,6 +15,7 @@
 #include <linux/sched.h>
 #include <linux/uaccess.h>
 #include <linux/fs.h>
+#include <linux/poll.h>
 #include <linux/version.h>
 
 static LIST_HEAD(ctx_list);
@@ -161,14 +162,53 @@ static ssize_t ptx_chrdev_read(struct file *file,
 
 		len = remain;
 		ret = ringbuffer_read_user(chrdev->ringbuf, p, &len);
-		if (unlikely(ret || !len))
+		if (unlikely(ret))
 			break;
+
+		if (unlikely(!len)) {
+			/*
+			 * Data may disappear between the readiness check and
+			 * ringbuffer_read_user(). An empty running stream is not EOF.
+			 */
+			if (unlikely(!atomic_read_acquire(&group->available))) {
+				if (remain == count)
+					ret = -EIO;
+			} else if (ringbuffer_is_running(chrdev->ringbuf)) {
+				if (!(file->f_flags & O_NONBLOCK))
+					continue;
+				if (remain == count)
+					ret = -EAGAIN;
+			}
+			break;
+		}
 
 		p += len;
 		remain -= len;
 	}
 
 	return likely(!ret) ? (count - remain) : ret;
+}
+
+static __poll_t ptx_chrdev_poll(struct file *file, poll_table *wait)
+{
+	struct ptx_chrdev *chrdev = file->private_data;
+	struct ptx_chrdev_group *group = chrdev->parent;
+	__poll_t mask = 0;
+
+	poll_wait(file, &chrdev->ringbuf_poll_wait, wait);
+
+	if (unlikely(!atomic_read_acquire(&group->available)))
+		return EPOLLERR | EPOLLHUP;
+
+	/* A poll-only consumer must also enable ringbuffer writes. */
+	ringbuffer_ready_read(chrdev->ringbuf);
+
+	if (ringbuffer_is_readable(chrdev->ringbuf))
+		mask |= EPOLLIN | EPOLLRDNORM;
+	if (!ringbuffer_is_running(chrdev->ringbuf))
+		mask |= EPOLLHUP;
+
+	return mask;
 }
 
 static int ptx_chrdev_release(struct inode *inode, struct file *file)
@@ -188,6 +228,7 @@ static int ptx_chrdev_release(struct inode *inode, struct file *file)
 
 		ringbuffer_stop(chrdev->ringbuf);
 		wake_up(&chrdev->ringbuf_wait);
+		wake_up_interruptible_poll(&chrdev->ringbuf_poll_wait, EPOLLHUP);
 		chrdev->streaming = false;
 	}
 
@@ -423,6 +464,7 @@ static long ptx_chrdev_unlocked_ioctl(struct file *file,
 		if (!ret) {
 			ringbuffer_stop(chrdev->ringbuf);
 			wake_up(&chrdev->ringbuf_wait);
+			wake_up_interruptible_poll(&chrdev->ringbuf_poll_wait, EPOLLHUP);
 			chrdev->streaming = false;
 		}
 
@@ -629,6 +671,7 @@ static struct file_operations ptx_chrdev_fops = {
 	.owner = THIS_MODULE,
 	.open = ptx_chrdev_open,
 	.read = ptx_chrdev_read,
+	.poll = ptx_chrdev_poll,
 	.release = ptx_chrdev_release,
 	.unlocked_ioctl = ptx_chrdev_unlocked_ioctl
 };
@@ -936,6 +979,7 @@ int ptx_chrdev_context_add_group(struct ptx_chrdev_context *chrdev_ctx,
 		chrdev->options = chrdev_config->options;
 		chrdev->streaming = false;
 		init_waitqueue_head(&chrdev->ringbuf_wait);
+		init_waitqueue_head(&chrdev->ringbuf_poll_wait);
 		chrdev->ringbuf_threshold_size = chrdev_config->ringbuf_threshold_size;
 		chrdev->ringbuf_write_size = 0;
 		chrdev->priv = chrdev_config->priv;
@@ -1138,6 +1182,8 @@ void ptx_chrdev_group_destroy(struct ptx_chrdev_group *chrdev_group)
 
 	for (i = 0; i < chrdev_group->chrdev_num; i++) {
 		wake_up(&chrdev_group->chrdev[i].ringbuf_wait);
+		wake_up_interruptible_poll(&chrdev_group->chrdev[i].ringbuf_poll_wait,
+					   EPOLLERR | EPOLLHUP);
 		device_destroy(ctx->class,
 			       MKDEV(MAJOR(ctx->dev_base),
 				     chrdev_group->minor_base + i));
@@ -1163,6 +1209,14 @@ int ptx_chrdev_put_stream(struct ptx_chrdev *chrdev, void *buf, size_t len)
 		return ret;
 
 	chrdev->ringbuf_write_size += len;
+
+	/*
+	 * Poll waiters need an immediate notification for any readable data.
+	 * Keep the existing threshold-based wakeup for blocking read().
+	 */
+	if (len)
+		wake_up_interruptible_poll(&chrdev->ringbuf_poll_wait,
+					   EPOLLIN | EPOLLRDNORM);
 
 	if (unlikely(chrdev->ringbuf_write_size >= chrdev->ringbuf_threshold_size)) {
 		wake_up(&chrdev->ringbuf_wait);
