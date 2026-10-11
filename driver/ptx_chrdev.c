@@ -134,7 +134,22 @@ static ssize_t ptx_chrdev_read(struct file *file,
 	while (likely(remain)) {
 		size_t len;
 
-		if (wait_event_interruptible(chrdev->ringbuf_wait,
+		/* O_NONBLOCK must never sleep on ringbuf_wait. Return any data
+		 * already read, or EAGAIN when the stream is still running.
+		 * The HAL live pump relies on this to honor worker cancellation.
+		 */
+		if (file->f_flags & O_NONBLOCK) {
+			if (!ringbuffer_is_readable(chrdev->ringbuf)) {
+				if (unlikely(!atomic_read(&group->available))) {
+					if (remain == count)
+						ret = -EIO;
+				} else if (ringbuffer_is_running(chrdev->ringbuf)) {
+					if (remain == count)
+						ret = -EAGAIN;
+				}
+				break;
+			}
+		} else if (wait_event_interruptible(chrdev->ringbuf_wait,
 					     likely(ringbuffer_is_readable(chrdev->ringbuf)) ||
 					     unlikely(!ringbuffer_is_running(chrdev->ringbuf)) ||
 					     unlikely(!atomic_read(&group->available)))) {
