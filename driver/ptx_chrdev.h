@@ -86,6 +86,7 @@ struct ptx_chrdev {
 	bool streaming;
 	struct ringbuffer *ringbuf;
 	wait_queue_head_t ringbuf_wait;
+	wait_queue_head_t ringbuf_poll_wait;
 	size_t ringbuf_threshold_size;
 	size_t ringbuf_write_size;
 	void *priv;
