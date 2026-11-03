@@ -719,6 +719,10 @@ static int isdb2056_chrdev_set_stream_id(struct ptx_chrdev *chrdev,
 		msleep(10);
 	}
 
+	/* 最後のTSID読み出しが失敗した場合は通信エラーを優先する */
+	if (ret)
+		return ret;
+
 	if (tsid2 != tsid)
 		ret = -EAGAIN;
 
