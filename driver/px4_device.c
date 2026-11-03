@@ -855,6 +855,10 @@ static int px4_chrdev_set_stream_id_s(struct ptx_chrdev *chrdev, u16 stream_id)
 		msleep(10);
 	}
 
+	/* 最後のTSID読み出しが失敗した場合は通信エラーを優先する */
+	if (ret)
+		return ret;
+
 	if (tsid2 != tsid)
 		ret = -EAGAIN;
 

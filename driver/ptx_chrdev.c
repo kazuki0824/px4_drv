@@ -174,9 +174,10 @@ static ssize_t ptx_chrdev_read(struct file *file,
 				if (remain == count)
 					ret = -EIO;
 			} else if (ringbuffer_is_running(chrdev->ringbuf)) {
-				if (!(file->f_flags & O_NONBLOCK))
+				/* 初回の空読み競合だけ再待機し、部分結果があれば返す */
+				if (!(file->f_flags & O_NONBLOCK) && remain == count)
 					continue;
-				if (remain == count)
+				if (remain == count && (file->f_flags & O_NONBLOCK))
 					ret = -EAGAIN;
 			}
 			break;
@@ -405,7 +406,8 @@ static long ptx_chrdev_unlocked_ioctl(struct file *file,
 				msleep(10);
 			}
 
-			if (ret != -ECANCELED && !locked)
+			/* 再試行後に残った通信エラーを、未ロック状態のエラーへ変換しない */
+			if (!ret && !locked)
 				ret = -EAGAIN;
 
 			if (ret)
@@ -445,6 +447,8 @@ static long ptx_chrdev_unlocked_ioctl(struct file *file,
 		if (!ret) {
 			ringbuffer_reset(chrdev->ringbuf);
 			ringbuffer_start(chrdev->ringbuf);
+			/* 再開時の状態変化を既存の poll 待機者へ通知する */
+			wake_up_interruptible_poll(&chrdev->ringbuf_poll_wait, 0);
 			chrdev->streaming = true;
 		}
 
