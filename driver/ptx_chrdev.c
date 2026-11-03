@@ -405,7 +405,8 @@ static long ptx_chrdev_unlocked_ioctl(struct file *file,
 				msleep(10);
 			}
 
-			if (ret != -ECANCELED && !locked)
+			/* 再試行後に残った通信エラーを、未ロック状態のエラーへ変換しない */
+			if (!ret && !locked)
 				ret = -EAGAIN;
 
 			if (ret)
