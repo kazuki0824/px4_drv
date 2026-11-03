@@ -174,9 +174,10 @@ static ssize_t ptx_chrdev_read(struct file *file,
 				if (remain == count)
 					ret = -EIO;
 			} else if (ringbuffer_is_running(chrdev->ringbuf)) {
-				if (!(file->f_flags & O_NONBLOCK))
+				/* 初回の空読み競合だけ再待機し、部分結果があれば返す */
+				if (!(file->f_flags & O_NONBLOCK) && remain == count)
 					continue;
-				if (remain == count)
+				if (remain == count && (file->f_flags & O_NONBLOCK))
 					ret = -EAGAIN;
 			}
 			break;
