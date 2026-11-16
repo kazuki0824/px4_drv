@@ -196,7 +196,8 @@ static __poll_t ptx_chrdev_poll(struct file *file, poll_table *wait)
 	struct ptx_chrdev_group *group = chrdev->parent;
 	__poll_t mask = 0;
 
-	poll_wait(file, &chrdev->ringbuf_poll_wait, wait);
+	/* 受信通知は blocking read と同じ書き込み閾値で起床させる */
+	poll_wait(file, &chrdev->ringbuf_wait, wait);
 
 	if (unlikely(!atomic_read_acquire(&group->available)))
 		return EPOLLERR | EPOLLHUP;
@@ -228,8 +229,7 @@ static int ptx_chrdev_release(struct inode *inode, struct file *file)
 			chrdev->ops->set_capture(chrdev, false);
 
 		ringbuffer_stop(chrdev->ringbuf);
-		wake_up(&chrdev->ringbuf_wait);
-		wake_up_interruptible_poll(&chrdev->ringbuf_poll_wait, EPOLLHUP);
+		wake_up_poll(&chrdev->ringbuf_wait, EPOLLHUP);
 		chrdev->streaming = false;
 	}
 
@@ -448,7 +448,7 @@ static long ptx_chrdev_unlocked_ioctl(struct file *file,
 			ringbuffer_reset(chrdev->ringbuf);
 			ringbuffer_start(chrdev->ringbuf);
 			/* 再開時の状態変化を既存の poll 待機者へ通知する */
-			wake_up_interruptible_poll(&chrdev->ringbuf_poll_wait, 0);
+			wake_up(&chrdev->ringbuf_wait);
 			chrdev->streaming = true;
 		}
 
@@ -467,8 +467,7 @@ static long ptx_chrdev_unlocked_ioctl(struct file *file,
 
 		if (!ret) {
 			ringbuffer_stop(chrdev->ringbuf);
-			wake_up(&chrdev->ringbuf_wait);
-			wake_up_interruptible_poll(&chrdev->ringbuf_poll_wait, EPOLLHUP);
+			wake_up_poll(&chrdev->ringbuf_wait, EPOLLHUP);
 			chrdev->streaming = false;
 		}
 
@@ -983,7 +982,6 @@ int ptx_chrdev_context_add_group(struct ptx_chrdev_context *chrdev_ctx,
 		chrdev->options = chrdev_config->options;
 		chrdev->streaming = false;
 		init_waitqueue_head(&chrdev->ringbuf_wait);
-		init_waitqueue_head(&chrdev->ringbuf_poll_wait);
 		chrdev->ringbuf_threshold_size = chrdev_config->ringbuf_threshold_size;
 		chrdev->ringbuf_write_size = 0;
 		chrdev->priv = chrdev_config->priv;
@@ -1185,9 +1183,8 @@ void ptx_chrdev_group_destroy(struct ptx_chrdev_group *chrdev_group)
 	atomic_xchg(&chrdev_group->available, 0);
 
 	for (i = 0; i < chrdev_group->chrdev_num; i++) {
-		wake_up(&chrdev_group->chrdev[i].ringbuf_wait);
-		wake_up_interruptible_poll(&chrdev_group->chrdev[i].ringbuf_poll_wait,
-					   EPOLLERR | EPOLLHUP);
+		wake_up_poll(&chrdev_group->chrdev[i].ringbuf_wait,
+			     EPOLLERR | EPOLLHUP);
 		device_destroy(ctx->class,
 			       MKDEV(MAJOR(ctx->dev_base),
 				     chrdev_group->minor_base + i));
@@ -1213,14 +1210,6 @@ int ptx_chrdev_put_stream(struct ptx_chrdev *chrdev, void *buf, size_t len)
 		return ret;
 
 	chrdev->ringbuf_write_size += len;
-
-	/*
-	 * Poll waiters need an immediate notification for any readable data.
-	 * Keep the existing threshold-based wakeup for blocking read().
-	 */
-	if (len)
-		wake_up_interruptible_poll(&chrdev->ringbuf_poll_wait,
-					   EPOLLIN | EPOLLRDNORM);
 
 	if (unlikely(chrdev->ringbuf_write_size >= chrdev->ringbuf_threshold_size)) {
 		wake_up(&chrdev->ringbuf_wait);
