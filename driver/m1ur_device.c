@@ -684,6 +684,10 @@ static int m1ur_chrdev_set_stream_id(struct ptx_chrdev *chrdev,
 		msleep(10);
 	}
 
+	/* if the last tc90522_get_tsid_s() failed, tsid2 is unset or left from a previous read, so return the error without comparing */
+	if (ret)
+		return ret;
+
 	if (tsid2 != tsid)
 		ret = -EAGAIN;
 

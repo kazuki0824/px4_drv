@@ -496,6 +496,7 @@ static int pxmlt_chrdev_set_stream_id(struct ptx_chrdev *chrdev, u16 stream_id)
 		"pxmlt_chrdev_set_stream_id %u:%u\n",
 		chrdev_group->id, chrdev->id);
 
+	/* stream_id が 8 未満なら相対 TS 番号 (CXD2856ER のスロット 0〜7)、8 以上なら絶対 TSID として扱う */
 	if (stream_id < 8) {
 		ret = cxd2856er_set_slot_isdbs(&chrdevm->cxd2856er, stream_id);
 		if (ret)

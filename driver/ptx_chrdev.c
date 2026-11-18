@@ -135,10 +135,7 @@ static ssize_t ptx_chrdev_read(struct file *file,
 	while (likely(remain)) {
 		size_t len;
 
-		/* O_NONBLOCK must never sleep on ringbuf_wait. Return any data
-		 * already read, or EAGAIN when the stream is still running.
-		 * The HAL live pump relies on this to honor worker cancellation.
-		 */
+		/* O_NONBLOCK ではデータを待たず、読み出せるデータがなければ受信中は -EAGAIN、停止後は EOF を返す */
 		if (file->f_flags & O_NONBLOCK) {
 			if (!ringbuffer_is_readable(chrdev->ringbuf)) {
 				if (unlikely(!atomic_read(&group->available))) {
@@ -166,17 +163,16 @@ static ssize_t ptx_chrdev_read(struct file *file,
 			break;
 
 		if (unlikely(!len)) {
-			/*
-			 * Data may disappear between the readiness check and
-			 * ringbuffer_read_user(). An empty running stream is not EOF.
-			 */
+			/* 読み出せることを確認してから読み出すまでに、同じデバイスファイルを読む別の read() がデータを読み切ることがある
+			 * 受信中に 0 を返すと利用側は EOF と解釈して受信を終えるため、まだ何も読んでいなければ待ち直し (O_NONBLOCK では -EAGAIN)、
+			 * 読み出し済みのデータがあればそれを返す */
 			if (unlikely(!atomic_read_acquire(&group->available))) {
 				if (remain == count)
 					ret = -EIO;
 			} else if (ringbuffer_is_running(chrdev->ringbuf)) {
-				if (!(file->f_flags & O_NONBLOCK))
+				if (!(file->f_flags & O_NONBLOCK) && remain == count)
 					continue;
-				if (remain == count)
+				if (remain == count && (file->f_flags & O_NONBLOCK))
 					ret = -EAGAIN;
 			}
 			break;
@@ -189,18 +185,20 @@ static ssize_t ptx_chrdev_read(struct file *file,
 	return likely(!ret) ? (count - remain) : ret;
 }
 
+/* poll の待機者は read() と同じ ringbuf_wait で待ち、リングバッファへの書き込みが閾値に達したときに起床する
+ * 受信データを書き込むたびに起床させると、USB の受信完了処理の中で TS パケットごとに起床処理が走り、URB の再投入が遅れるため */
 static __poll_t ptx_chrdev_poll(struct file *file, poll_table *wait)
 {
 	struct ptx_chrdev *chrdev = file->private_data;
 	struct ptx_chrdev_group *group = chrdev->parent;
 	__poll_t mask = 0;
 
-	poll_wait(file, &chrdev->ringbuf_poll_wait, wait);
+	poll_wait(file, &chrdev->ringbuf_wait, wait);
 
 	if (unlikely(!atomic_read_acquire(&group->available)))
 		return EPOLLERR | EPOLLHUP;
 
-	/* A poll-only consumer must also enable ringbuffer writes. */
+	/* リングバッファへの書き込みは read() か poll() が呼ばれた時点で始まるため、poll() で待つ利用者のためにここでも開始する */
 	ringbuffer_ready_read(chrdev->ringbuf);
 
 	if (ringbuffer_is_readable(chrdev->ringbuf))
@@ -227,8 +225,7 @@ static int ptx_chrdev_release(struct inode *inode, struct file *file)
 			chrdev->ops->set_capture(chrdev, false);
 
 		ringbuffer_stop(chrdev->ringbuf);
-		wake_up(&chrdev->ringbuf_wait);
-		wake_up_interruptible_poll(&chrdev->ringbuf_poll_wait, EPOLLHUP);
+		wake_up_poll(&chrdev->ringbuf_wait, EPOLLHUP);
 		chrdev->streaming = false;
 	}
 
@@ -405,7 +402,8 @@ static long ptx_chrdev_unlocked_ioctl(struct file *file,
 				msleep(10);
 			}
 
-			if (ret != -ECANCELED && !locked)
+			/* -EAGAIN は未ロック (信号を受信できていない) ことを示すため、最後の check_lock() が通信エラーで失敗した場合はそのエラーを返す */
+			if (!ret && !locked)
 				ret = -EAGAIN;
 
 			if (ret)
@@ -445,6 +443,9 @@ static long ptx_chrdev_unlocked_ioctl(struct file *file,
 		if (!ret) {
 			ringbuffer_reset(chrdev->ringbuf);
 			ringbuffer_start(chrdev->ringbuf);
+			/* START より前に poll / epoll で待ち始めた利用者は、ptx_chrdev_poll() が呼ばれるまでリングバッファへの書き込みが始まらないため、
+			 * ここで起床させて poll() を再評価させる */
+			wake_up(&chrdev->ringbuf_wait);
 			chrdev->streaming = true;
 		}
 
@@ -463,8 +464,7 @@ static long ptx_chrdev_unlocked_ioctl(struct file *file,
 
 		if (!ret) {
 			ringbuffer_stop(chrdev->ringbuf);
-			wake_up(&chrdev->ringbuf_wait);
-			wake_up_interruptible_poll(&chrdev->ringbuf_poll_wait, EPOLLHUP);
+			wake_up_poll(&chrdev->ringbuf_wait, EPOLLHUP);
 			chrdev->streaming = false;
 		}
 
@@ -979,7 +979,6 @@ int ptx_chrdev_context_add_group(struct ptx_chrdev_context *chrdev_ctx,
 		chrdev->options = chrdev_config->options;
 		chrdev->streaming = false;
 		init_waitqueue_head(&chrdev->ringbuf_wait);
-		init_waitqueue_head(&chrdev->ringbuf_poll_wait);
 		chrdev->ringbuf_threshold_size = chrdev_config->ringbuf_threshold_size;
 		chrdev->ringbuf_write_size = 0;
 		chrdev->priv = chrdev_config->priv;
@@ -1181,9 +1180,8 @@ void ptx_chrdev_group_destroy(struct ptx_chrdev_group *chrdev_group)
 	atomic_xchg(&chrdev_group->available, 0);
 
 	for (i = 0; i < chrdev_group->chrdev_num; i++) {
-		wake_up(&chrdev_group->chrdev[i].ringbuf_wait);
-		wake_up_interruptible_poll(&chrdev_group->chrdev[i].ringbuf_poll_wait,
-					   EPOLLERR | EPOLLHUP);
+		wake_up_poll(&chrdev_group->chrdev[i].ringbuf_wait,
+			     EPOLLERR | EPOLLHUP);
 		device_destroy(ctx->class,
 			       MKDEV(MAJOR(ctx->dev_base),
 				     chrdev_group->minor_base + i));
@@ -1209,14 +1207,6 @@ int ptx_chrdev_put_stream(struct ptx_chrdev *chrdev, void *buf, size_t len)
 		return ret;
 
 	chrdev->ringbuf_write_size += len;
-
-	/*
-	 * Poll waiters need an immediate notification for any readable data.
-	 * Keep the existing threshold-based wakeup for blocking read().
-	 */
-	if (len)
-		wake_up_interruptible_poll(&chrdev->ringbuf_poll_wait,
-					   EPOLLIN | EPOLLRDNORM);
 
 	if (unlikely(chrdev->ringbuf_write_size >= chrdev->ringbuf_threshold_size)) {
 		wake_up(&chrdev->ringbuf_wait);
